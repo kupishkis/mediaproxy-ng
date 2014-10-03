@@ -1449,6 +1449,7 @@ static int __init_stream(struct packet_stream *ps) {
 	struct call *call = ps->call;
 	int active;
 
+    __C_DBG("stream init: %p", (void *) ps);
 	if (ps->sfd) {
 		if (media->sdes)
 			crypto_init(&ps->sfd->crypto, &media->sdes_in.params);

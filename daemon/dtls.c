@@ -386,15 +386,23 @@ int dtls_verify_cert(struct packet_stream *ps) {
 static int try_connect(struct dtls_connection *d) {
 	int ret, code;
 
-	if (d->connected)
+	if (d->connected && !d->active) {
+        __DBG("try_connect: already connected");
 		return 0;
+    }
 
-	__DBG("try_connect(%i)", d->active);
+	__DBG("try_connect(%p) active: %i, connected: %i", d, d->active, d->connected);
 
-	if (d->active)
+	if (d->active) {
+        __DBG("try_connect -> active");
 		ret = SSL_connect(d->ssl);
-	else
+    }
+	else {
+        __DBG("try_connect <- passive");
 		ret = SSL_accept(d->ssl);
+    }
+
+	__DBG("try_connect returns: %i", ret);
 
 	code = SSL_get_error(d->ssl, ret);
 
@@ -407,7 +415,10 @@ static int try_connect(struct dtls_connection *d) {
 			break;
 
 		case SSL_ERROR_WANT_READ:
+            __DBG("try_connect want read");
+            break;
 		case SSL_ERROR_WANT_WRITE:
+            __DBG("try_connect want write");
 			break;
 
 		default:
@@ -424,12 +435,12 @@ int dtls_connection_init(struct packet_stream *ps, int active, struct dtls_cert 
 	struct dtls_connection *d = &ps->sfd->dtls;
 	unsigned long err;
 
-	__DBG("dtls_connection_init(%i)", active);
+	__DBG("dtls_connection_init: should be active: %i, is active: %i, is connected: %i", active, d->active, d->connected);
 
 	/* If dtls connection exists */
 	if (d->init) {
 		/* Check if it can be forwarded to connect stage */
-		if ((d->active && d->active) == active)
+		if ((!d->active && !active) || (d->active && active))
 			goto connect;
 		/* Else cleanup. */
 		/* XXX: check if *_bio are released in this case. */
@@ -590,8 +601,10 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 			(unsigned char) s->s[8], (unsigned char) s->s[9], (unsigned char) s->s[10], (unsigned char) s->s[11],
 			(unsigned char) s->s[12], (unsigned char) s->s[13], (unsigned char) s->s[14], (unsigned char) s->s[15]);
 
-	if (d->connected)
+	if (d->connected) {
+        __DBG("dtls already connected");
 		return 0;
+    }
 
 	if (!d->init || !d->ssl)
 		return -1;
@@ -603,6 +616,7 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 		ps->media->sdes = 0;
 	}
 
+    __DBG("dtls(%p) trying to connect", (void *) d);
 	ret = try_connect(d);
 	if (ret == -1) {
 		if (ps->sfd)
