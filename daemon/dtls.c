@@ -21,7 +21,7 @@
 
 
 
-#define DTLS_DEBUG 0
+#define DTLS_DEBUG 1
 
 #if DTLS_DEBUG
 #define __DBG(x...) ilog(LOG_DEBUG, x)
@@ -426,9 +426,14 @@ int dtls_connection_init(struct packet_stream *ps, int active, struct dtls_cert 
 
 	__DBG("dtls_connection_init(%i)", active);
 
+	/* If dtls connection exists */
 	if (d->init) {
-		if (d->active == active)
+		/* Check if it can be forwarded to connect stage */
+		if ((d->active && d->active) == active)
 			goto connect;
+		/* Else cleanup. */
+		/* XXX: check if *_bio are released in this case. */
+		__DBG("dtls_connection_init: may not resume existing connection, performing cleanup");
 		dtls_connection_cleanup(d);
 	}
 
@@ -592,6 +597,7 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 		return -1;
 
 	if (s) {
+		/* push the packet to incoming stream */
 		BIO_write(d->r_bio, s->s, s->len);
 		/* we understand this as preference of DTLS over SDES */
 		ps->media->sdes = 0;
@@ -671,10 +677,13 @@ void dtls_connection_cleanup(struct dtls_connection *c) {
 	if (c->ssl)
 		SSL_free(c->ssl);
 	if (!c->init) {
+		__DBG("dtls_connection_cleanup: releasing unnasigned BIO resources");
 		if (c->r_bio)
 			BIO_free(c->r_bio);
 		if (c->w_bio)
 			BIO_free(c->w_bio);
+	} else {
+		__DBG("dtls_connection_cleanup: leaving r_bio(%p) w_bio(%p)", (void *)c->r_bio, (void *)c->w_bio);
 	}
 	ZERO(*c);
 }

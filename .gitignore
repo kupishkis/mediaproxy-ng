@@ -1,1 +1,4 @@
 .*.sw?
+*.log
+debian/
+build-stamp
