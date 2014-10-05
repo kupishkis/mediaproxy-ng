@@ -354,36 +354,33 @@ static int verify_callback(int ok, X509_STORE_CTX *store) {
 }
 
 static void info_callback(const SSL *ssl, int where, int ret) {
-    const char *str;
-    int w;
-    w=where& ~SSL_ST_MASK;
-    if (w & SSL_ST_CONNECT) str="SSL_connect";
-    else if (w & SSL_ST_ACCEPT) str="SSL_accept";
-    else str="undefined";
-    if (where & SSL_CB_LOOP)
-    {
-        ilog(LOG_ERROR, "SSL loop: %s:%s\n",str,SSL_state_string_long(ssl));
-    }
-    else if (where & SSL_CB_ALERT)
-    {
-        str=(where & SSL_CB_READ)?"read":"write";
-        ilog(LOG_WARNING, "SSL alert: %s:%s:%s\n",
-                str,
-                SSL_alert_type_string_long(ret),
-                SSL_alert_desc_string_long(ret)
-            );
-    }
-    else if (where & SSL_CB_EXIT)
-    {
-        if (ret == 0)
-            ilog(LOG_ERROR, "SSL error: %s:failed in %s\n",
-                    str,SSL_state_string_long(ssl));
-        else if (ret < 0)
-        {
-            ilog(LOG_ERROR,"SSL error: %s:error in %s\n",
-                    str,SSL_state_string_long(ssl));
-        }
-    }
+	const char *str;
+	int w;
+	w=where& ~SSL_ST_MASK;
+	if (w & SSL_ST_CONNECT) str="SSL_connect";
+	else if (w & SSL_ST_ACCEPT) str="SSL_accept";
+	else str="undefined";
+	if (where & SSL_CB_LOOP) {
+		ilog(LOG_ERROR, "SSL loop: %s:%s\n",str,SSL_state_string_long(ssl));
+	}
+	else if (where & SSL_CB_ALERT) {
+		str=(where & SSL_CB_READ)?"read":"write";
+		ilog(LOG_WARNING, "SSL alert: %s:%s:%s\n",
+				str,
+				SSL_alert_type_string_long(ret),
+				SSL_alert_desc_string_long(ret)
+			);
+	}
+	else if (where & SSL_CB_EXIT) {
+		if (ret == 0) {
+			ilog(LOG_ERROR, "SSL error: %s:failed in %s\n",
+					str,SSL_state_string_long(ssl));
+		}
+		else if (ret < 0) {
+			ilog(LOG_ERROR,"SSL error: %s:error in %s\n",
+					str,SSL_state_string_long(ssl));
+		}
+	}
 }
 
 int dtls_verify_cert(struct packet_stream *ps) {
@@ -443,6 +440,7 @@ static int try_shutdown(struct dtls_connection *d) {
 		case SSL_ERROR_NONE:
 			ilog(LOG_DEBUG, "DTLS shutdown successful");
 			d->connected = 0;
+			d->stopped = 1;
 			ret = 1;
 			break;
 
@@ -468,18 +466,18 @@ static int try_connect(struct dtls_connection *d) {
 	int ret, code;
 
 	if (d->connected) {
-        __DBG("try_connect: already connected");
+		__DBG("try_connect: already connected");
 		return 0;
     }
 
 	__DBG("try_connect(%i)", d->active);
 
 	if (d->active) {
-        __DBG("try_connect -> active");
+		__DBG("try_connect -> active");
 		ret = SSL_connect(d->ssl);
     }
 	else {
-        __DBG("try_connect <- passive");
+		__DBG("try_connect <- passive");
 		ret = SSL_accept(d->ssl);
     }
 
@@ -492,14 +490,15 @@ static int try_connect(struct dtls_connection *d) {
 		case SSL_ERROR_NONE:
 			ilog(LOG_DEBUG, "DTLS handshake successful");
 			d->connected = 1;
+			d->stopped = 0;
 			ret = 1;
 			break;
 
 		case SSL_ERROR_WANT_READ:
-            __DBG("try_connect want read");
-            break;
+			__DBG("try_connect want read");
+			break;
 		case SSL_ERROR_WANT_WRITE:
-            __DBG("try_connect want write");
+			__DBG("try_connect want write");
 			break;
 
 		default:
@@ -543,7 +542,7 @@ int dtls_connection_init(struct packet_stream *ps, int active, struct dtls_cert 
 	SSL_CTX_set_verify_depth(d->ssl_ctx, 4);
 	SSL_CTX_set_cipher_list(d->ssl_ctx, "ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
 
-    SSL_CTX_set_info_callback(d->ssl_ctx, info_callback);
+	SSL_CTX_set_info_callback(d->ssl_ctx, info_callback);
 
 	if (SSL_CTX_set_tlsext_use_srtp(d->ssl_ctx, ciphers_str))
 		goto error;
@@ -565,6 +564,7 @@ int dtls_connection_init(struct packet_stream *ps, int active, struct dtls_cert 
 	d->active = active;
 
 connect:
+	d->stopped = 0;
 	dtls(ps, NULL, NULL);
 
 	return 0;
@@ -694,7 +694,7 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 		ps->media->sdes = 0;
 	}
 
-	if (!d->connected) {
+	if (!d->connected && !d->stopped) {
 		__DBG("dtls: trying to connect");
 		ret = try_connect(d);
 		if (ret == -1) {
@@ -725,7 +725,12 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 			}
 		}
 		else {
-			__DBG("dtls: already connected");
+			if (d->stopped) {
+				__DBG("dtls: stopped and not reconnecting");
+			}
+			else {
+				__DBG("dtls: already connected");
+			}
 			return 0;
 		}
 	}
@@ -786,13 +791,10 @@ void dtls_connection_cleanup(struct dtls_connection *c) {
 	if (c->ssl)
 		SSL_free(c->ssl);
 	if (!c->init) {
-		__DBG("dtls_connection_cleanup: releasing unnasigned BIO resources");
 		if (c->r_bio)
 			BIO_free(c->r_bio);
 		if (c->w_bio)
 			BIO_free(c->w_bio);
-	} else {
-		__DBG("dtls_connection_cleanup: leaving r_bio(%p) w_bio(%p)", (void *)c->r_bio, (void *)c->w_bio);
 	}
 	ZERO(*c);
 }

@@ -50,7 +50,8 @@ struct dtls_connection {
 	BIO *r_bio, *w_bio;
 	int init:1,
 	    active:1,
-	    connected:1;
+	    connected:1,
+	    stopped:1;
 };
 
 
