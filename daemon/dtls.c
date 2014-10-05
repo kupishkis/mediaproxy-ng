@@ -353,6 +353,39 @@ static int verify_callback(int ok, X509_STORE_CTX *store) {
 	return 1;
 }
 
+static void info_callback(const SSL *ssl, int where, int ret) {
+    const char *str;
+    int w;
+    w=where& ~SSL_ST_MASK;
+    if (w & SSL_ST_CONNECT) str="SSL_connect";
+    else if (w & SSL_ST_ACCEPT) str="SSL_accept";
+    else str="undefined";
+    if (where & SSL_CB_LOOP)
+    {
+        ilog(LOG_ERROR, "SSL loop: %s:%s\n",str,SSL_state_string_long(ssl));
+    }
+    else if (where & SSL_CB_ALERT)
+    {
+        str=(where & SSL_CB_READ)?"read":"write";
+        ilog(LOG_WARNING, "SSL alert: %s:%s:%s\n",
+                str,
+                SSL_alert_type_string_long(ret),
+                SSL_alert_desc_string_long(ret)
+            );
+    }
+    else if (where & SSL_CB_EXIT)
+    {
+        if (ret == 0)
+            ilog(LOG_ERROR, "SSL error: %s:failed in %s\n",
+                    str,SSL_state_string_long(ssl));
+        else if (ret < 0)
+        {
+            ilog(LOG_ERROR,"SSL error: %s:error in %s\n",
+                    str,SSL_state_string_long(ssl));
+        }
+    }
+}
+
 int dtls_verify_cert(struct packet_stream *ps) {
 	unsigned char fp[DTLS_MAX_DIGEST_LEN];
 	struct call_media *media;
@@ -383,15 +416,63 @@ int dtls_verify_cert(struct packet_stream *ps) {
 	return 0;
 }
 
+static int try_shutdown(struct dtls_connection *d) {
+	int ret, code;
+
+	if (!d->connected) {
+		__DBG("try_shutdown: already disconnected");
+		return 0;
+	}
+
+	__DBG("try_disconnect(%i)", d->active);
+
+	ret = SSL_shutdown(d->ssl);
+
+	__DBG("try_disconnect: returns: %i", ret);
+
+	//We do not want a bidirectional shutdown.
+	if (ret != 0) {
+		code = SSL_get_error(d->ssl, ret);
+	}
+	else {
+		code = SSL_ERROR_NONE;
+	}
+
+	ret = 0;
+	switch (code) {
+		case SSL_ERROR_NONE:
+			ilog(LOG_DEBUG, "DTLS shutdown successful");
+			d->connected = 0;
+			ret = 1;
+			break;
+
+		case SSL_ERROR_WANT_READ:
+			__DBG("try_disconnect want read");
+			break;
+		case SSL_ERROR_WANT_WRITE:
+			__DBG("try_disconnect want write");
+			break;
+
+		default:
+			ret = ERR_peek_last_error();
+			ilog(LOG_ERROR, "DTLS error: %i (%s)", code, ERR_reason_error_string(ret));
+			ret = -1;
+			break;
+	}
+
+	return ret;
+
+}
+
 static int try_connect(struct dtls_connection *d) {
 	int ret, code;
 
-	if (d->connected && !d->active) {
+	if (d->connected) {
         __DBG("try_connect: already connected");
 		return 0;
     }
 
-	__DBG("try_connect(%p) active: %i, connected: %i", d, d->active, d->connected);
+	__DBG("try_connect(%i)", d->active);
 
 	if (d->active) {
         __DBG("try_connect -> active");
@@ -402,7 +483,7 @@ static int try_connect(struct dtls_connection *d) {
 		ret = SSL_accept(d->ssl);
     }
 
-	__DBG("try_connect returns: %i", ret);
+	__DBG("try_connect: returns: %i", ret);
 
 	code = SSL_get_error(d->ssl, ret);
 
@@ -461,6 +542,8 @@ int dtls_connection_init(struct packet_stream *ps, int active, struct dtls_cert 
 			verify_callback);
 	SSL_CTX_set_verify_depth(d->ssl_ctx, 4);
 	SSL_CTX_set_cipher_list(d->ssl_ctx, "ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
+
+    SSL_CTX_set_info_callback(d->ssl_ctx, info_callback);
 
 	if (SSL_CTX_set_tlsext_use_srtp(d->ssl_ctx, ciphers_str))
 		goto error;
@@ -601,11 +684,6 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 			(unsigned char) s->s[8], (unsigned char) s->s[9], (unsigned char) s->s[10], (unsigned char) s->s[11],
 			(unsigned char) s->s[12], (unsigned char) s->s[13], (unsigned char) s->s[14], (unsigned char) s->s[15]);
 
-	if (d->connected) {
-        __DBG("dtls already connected");
-		return 0;
-    }
-
 	if (!d->init || !d->ssl)
 		return -1;
 
@@ -616,22 +694,39 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 		ps->media->sdes = 0;
 	}
 
-    __DBG("dtls(%p) trying to connect", (void *) d);
-	ret = try_connect(d);
-	if (ret == -1) {
-		if (ps->sfd)
-			ilog(LOG_ERROR, "DTLS error on local port %hu", ps->sfd->fd.localport);
-		/* fatal error */
-		dtls_connection_cleanup(d);
-		return 0;
-	}
-	else if (ret == 1) {
-		/* connected! */
-		if (dtls_setup_crypto(ps, d))
-			/* XXX ?? */ ;
-		if (ps->rtp && ps->rtcp && ps->rtcp_sibling && ps->media->rtcp_mux) {
-			if (dtls_setup_crypto(ps->rtcp_sibling, d))
+	if (!d->connected) {
+		__DBG("dtls: trying to connect");
+		ret = try_connect(d);
+		if (ret == -1) {
+			if (ps->sfd)
+				ilog(LOG_ERROR, "DTLS error on local port %hu", ps->sfd->fd.localport);
+			/* fatal error */
+			dtls_connection_cleanup(d);
+			return 0;
+		}
+		else if (ret == 1) {
+			/* connected! */
+			if (dtls_setup_crypto(ps, d))
 				/* XXX ?? */ ;
+			if (ps->rtp && ps->rtcp && ps->rtcp_sibling && ps->media->rtcp_mux) {
+				if (dtls_setup_crypto(ps->rtcp_sibling, d))
+					/* XXX ?? */ ;
+			}
+		}
+	}
+	else {
+		if (s && is_dtls_alert(s)) {
+			__DBG("dtls: alert received");
+			ret = try_shutdown(d);
+			if (ret == -1) {
+				ilog(LOG_ERROR, "DTLS error while shutting down");
+				dtls_connection_cleanup(d);
+				return 0;
+			}
+		}
+		else {
+			__DBG("dtls: already connected");
+			return 0;
 		}
 	}
 

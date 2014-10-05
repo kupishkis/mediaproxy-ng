@@ -97,7 +97,15 @@ static inline int is_dtls(const str *s) {
 	return 0;
 }
 
+static inline int is_dtls_alert(const str *s) {
+	const unsigned char *b = (const void *) s->s;
+	if (s->len < 1)
+		return 0;
+	if (b[0] == 21)
+		return 1;
 
+	return 0;
+}
 
 
 #endif

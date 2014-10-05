@@ -817,11 +817,14 @@ static void call_timer_iterator(void *key, void *val, void *ptr) {
 		mutex_lock(&ps->in_lock);
 
 		sfd = ps->sfd;
+		log_info_stream_fd(sfd);
 		if (!sfd || !ps->media)
 			goto next;
 
-		if (ps->media->dtls && sfd->dtls.init && !sfd->dtls.connected)
+		if (ps->media->dtls && sfd->dtls.init && !sfd->dtls.connected) {
+            ilog(LOG_DEBUG, "Trigerring dtls negotiation in a stream %p", (void *) ps);
 			dtls(ps, NULL, NULL);
+        }
 
 		if (hlp->ports[sfd->fd.localport])
 			goto next;
@@ -839,6 +842,7 @@ static void call_timer_iterator(void *key, void *val, void *ptr) {
 			good = 1;
 
 next:
+		log_info_clear();
 		mutex_unlock(&ps->in_lock);
 	}
 
