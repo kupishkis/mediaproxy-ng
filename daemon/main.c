@@ -112,8 +112,10 @@ static void sighandler(gpointer x) {
 			abort();
 		}
 		
-		if (ret == SIGINT || ret == SIGTERM)
+		if (ret == SIGINT || ret == SIGTERM) {
+			//Due to this line, process may not be debugged normaly.
 			global_shutdown = 1;
+		}
 		else if (ret == SIGUSR1) {
 		        if (g_atomic_int_get(&log_level) > 0) {
 				g_atomic_int_add(&log_level, -1);

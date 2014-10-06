@@ -440,7 +440,6 @@ static int try_shutdown(struct dtls_connection *d) {
 		case SSL_ERROR_NONE:
 			ilog(LOG_DEBUG, "DTLS shutdown successful");
 			d->connected = 0;
-			d->stopped = 1;
 			ret = 1;
 			break;
 
@@ -490,7 +489,6 @@ static int try_connect(struct dtls_connection *d) {
 		case SSL_ERROR_NONE:
 			ilog(LOG_DEBUG, "DTLS handshake successful");
 			d->connected = 1;
-			d->stopped = 0;
 			ret = 1;
 			break;
 
@@ -564,7 +562,6 @@ int dtls_connection_init(struct packet_stream *ps, int active, struct dtls_cert 
 	d->active = active;
 
 connect:
-	d->stopped = 0;
 	dtls(ps, NULL, NULL);
 
 	return 0;
@@ -694,47 +691,42 @@ int dtls(struct packet_stream *ps, const str *s, struct sockaddr_in6 *fsin) {
 		ps->media->sdes = 0;
 	}
 
-	if (!d->connected && !d->stopped) {
-		__DBG("dtls: trying to connect");
-		ret = try_connect(d);
+	if (s && is_dtls_alert(s)) {
+		__DBG("dtls: alert received");
+		ret = try_shutdown(d);
 		if (ret == -1) {
-			if (ps->sfd)
-				ilog(LOG_ERROR, "DTLS error on local port %hu", ps->sfd->fd.localport);
-			/* fatal error */
+			ilog(LOG_ERROR, "DTLS error while shutting down");
 			dtls_connection_cleanup(d);
 			return 0;
 		}
-		else if (ret == 1) {
-			/* connected! */
-			if (dtls_setup_crypto(ps, d))
-				/* XXX ?? */ ;
-			if (ps->rtp && ps->rtcp && ps->rtcp_sibling && ps->media->rtcp_mux) {
-				if (dtls_setup_crypto(ps->rtcp_sibling, d))
-					/* XXX ?? */ ;
-			}
-		}
+		goto emit;
 	}
-	else {
-		if (s && is_dtls_alert(s)) {
-			__DBG("dtls: alert received");
-			ret = try_shutdown(d);
-			if (ret == -1) {
-				ilog(LOG_ERROR, "DTLS error while shutting down");
-				dtls_connection_cleanup(d);
-				return 0;
-			}
-		}
-		else {
-			if (d->stopped) {
-				__DBG("dtls: stopped and not reconnecting");
-			}
-			else {
-				__DBG("dtls: already connected");
-			}
-			return 0;
+
+	if (d->connected) {
+		__DBG("dtls: already connected");
+		return 0;
+	}
+
+	__DBG("dtls: trying to connect");
+	ret = try_connect(d);
+	if (ret == -1) {
+		if (ps->sfd)
+			ilog(LOG_ERROR, "DTLS error on local port %hu", ps->sfd->fd.localport);
+		/* fatal error */
+		dtls_connection_cleanup(d);
+		return 0;
+	}
+	else if (ret == 1) {
+		/* connected! */
+		if (dtls_setup_crypto(ps, d))
+			/* XXX ?? */ ;
+		if (ps->rtp && ps->rtcp && ps->rtcp_sibling && ps->media->rtcp_mux) {
+			if (dtls_setup_crypto(ps->rtcp_sibling, d))
+				/* XXX ?? */ ;
 		}
 	}
 
+emit:
 	ret = BIO_ctrl_pending(d->w_bio);
 	if (ret <= 0)
 		return 0;
